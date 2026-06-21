@@ -24,7 +24,7 @@ jobs:
           make
 
       - name: Upload dylib
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: 80poolUnlimited.dylib
           path: .theos/obj/debug/80poolUnlimited.dylib
