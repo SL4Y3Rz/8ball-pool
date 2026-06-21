@@ -25,10 +25,10 @@ jobs:
         run: |
           export THEOS=~/theos
           export THEOS_MAKE_PATH=~/theos/makefiles
-          make
+          make FINALPACKAGE=1 STRIP=1
 
       - name: Upload dylib
         uses: actions/upload-artifact@v4
         with:
           name: 80poolUnlimited.dylib
-          path: .theos/obj/debug/80poolUnlimited.dylib
+          path: .theos/obj/release/80poolUnlimited.dylib
