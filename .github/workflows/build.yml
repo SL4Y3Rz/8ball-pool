@@ -27,11 +27,14 @@ jobs:
           export THEOS_MAKE_PATH=~/theos/makefiles
           make FINALPACKAGE=1 STRIP=1
 
-      - name: Find dylib
-        run: find .theos/obj -name "*.dylib"
+      - name: Find and copy dylib
+        run: |
+          find .theos -name "*.dylib" 
+          mkdir -p output
+          find .theos -name "*.dylib" -exec cp {} output/80poolUnlimited.dylib \;
 
       - name: Upload dylib
         uses: actions/upload-artifact@v4
         with:
-          name: 80poolUnlimited.dylib
-          path: .theos/obj/release/80poolUnlimited.dylib
+          name: 80poolUnlimited
+          path: output/80poolUnlimited.dylib
