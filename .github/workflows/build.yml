@@ -1,28 +1,28 @@
-name: Build iOS Dylib
+name: Build dylib
 
-on: [push]
+on:
+  push:
+    branches: [ main ]
 
 jobs:
   build:
     runs-on: macos-latest
+
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v3
 
-      - name: Compile Dylib
+      - name: Install Theos
         run: |
-          clang++ -arch arm64 \
-            -std=c++17 \
-            -dynamiclib \
-            -O2 \
-            -fPIC \
-            -framework Foundation \
-            -miphoneos-version-min=14.0 \
-            -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
-            -o .dylib \
-            .cpp
+          bash -c "$(curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos)"
 
-      - name: Upload Dylib
-        uses: actions/upload-artifact@v4
+      - name: Build
+        run: |
+          export THEOS=~/theos
+          make
+
+      - name: Upload dylib
+        uses: actions/upload-artifact@v3
         with:
-          name: 
-          path: 
+          name: 80poolUnlimited.dylib
+          path: .theos/obj/debug/80poolUnlimited.dylib
+
