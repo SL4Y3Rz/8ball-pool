@@ -27,6 +27,9 @@ jobs:
           export THEOS_MAKE_PATH=~/theos/makefiles
           make FINALPACKAGE=1 STRIP=1
 
+      - name: Find dylib
+        run: find .theos/obj -name "*.dylib"
+
       - name: Upload dylib
         uses: actions/upload-artifact@v4
         with:
