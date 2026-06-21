@@ -3,10 +3,10 @@ TARGET = iphone:clang:latest:14.0
 
 include $(THEOS)/makefiles/common.mk
 
-LIBRARY_NAME                 = 8ball-pool
-8ball-pool_FILES        = Tweak.xm
-8ball-pool_FRAMEWORKS   = UIKit
-8ball-pool_LIBRARIES    = substrate
-8ball-pool_INSTALL_PATH = /Library/MobileSubstrate/DynamicLibraries
+LIBRARY_NAME                  = 80poolUnlimited
+80poolUnlimited_FILES         = Tweak.xm
+80poolUnlimited_FRAMEWORKS    = UIKit
+80poolUnlimited_LIBRARIES     = substrate
+80poolUnlimited_INSTALL_PATH  = /Library/MobileSubstrate/DynamicLibraries
 
 include $(THEOS_MAKE_PATH)/library.mk
