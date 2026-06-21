@@ -11,11 +11,16 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
-      - name: Setup Theos
-        uses: theos/theos-action@main
-        with:
-          caching: true
-          sdks-url: https://github.com/theos/sdks/releases/download/2024-11/iPhoneOS18.1.sdk.tar.xz
+      - name: Install Theos
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          brew install ldid xz
+          git clone --recursive https://github.com/theos/theos.git ~/theos
+          curl -L https://github.com/theos/sdks/releases/download/2024-11/iPhoneOS18.1.sdk.tar.xz \
+            -o /tmp/sdk.tar.xz
+          mkdir -p ~/theos/sdks
+          tar -xf /tmp/sdk.tar.xz -C ~/theos/sdks
 
       - name: Build
         run: |
@@ -24,7 +29,7 @@ jobs:
           make
 
       - name: Upload dylib
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v3
         with:
           name: 80poolUnlimited.dylib
           path: .theos/obj/debug/80poolUnlimited.dylib
