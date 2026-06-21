@@ -11,9 +11,11 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
-      - name: Install Theos
-        run: |
-          bash -c "$(curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos)"
+      - name: Setup Theos
+        uses: theos/theos-action@main
+        with:
+          caching: true
+          sdks-url: https://github.com/theos/sdks/releases/download/2024-11/iPhoneOS18.1.sdk.tar.xz
 
       - name: Build
         run: |
@@ -22,7 +24,7 @@ jobs:
           make
 
       - name: Upload dylib
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v3
         with:
           name: 80poolUnlimited.dylib
           path: .theos/obj/debug/80poolUnlimited.dylib
