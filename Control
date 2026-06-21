@@ -1,9 +1,9 @@
-Package: com.axiom.80poolunlimited
+Package: com.SL43.80poolunlimited
 Name: 80poolUnlimited
 Version: 1.0.0
 Architecture: iphoneos-arm64
 Description: No ads, unlimited automation
-Maintainer: axiom
-Author: axiom
+Maintainer: SL43
+Author: SL43
 Section: Tweaks
 Depends: mobilesubstrate
