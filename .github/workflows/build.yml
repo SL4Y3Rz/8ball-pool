@@ -12,15 +12,15 @@ jobs:
       - uses: actions/checkout@v3
 
       - name: Install Theos
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           brew install ldid xz
           git clone --recursive https://github.com/theos/theos.git ~/theos
-          curl -L https://github.com/theos/sdks/releases/download/2024-11/iPhoneOS18.1.sdk.tar.xz \
-            -o /tmp/sdk.tar.xz
+          curl -L --output /tmp/sdk.tar.xz \
+            "https://github.com/theos/sdks/releases/download/2024-11/iPhoneOS18.1.sdk.tar.xz" \
+            -H "Accept: application/octet-stream"
+          file /tmp/sdk.tar.xz
           mkdir -p ~/theos/sdks
-          tar -xf /tmp/sdk.tar.xz -C ~/theos/sdks
+          tar -xJf /tmp/sdk.tar.xz -C ~/theos/sdks
 
       - name: Build
         run: |
