@@ -23,6 +23,6 @@ jobs:
       - name: Upload dylib
         uses: actions/upload-artifact@v3
         with:
-          name: 80poolUnlimited.dylib
-          path: .theos/obj/debug/80poolUnlimited.dylib
+          name: 8ball-pool.dylib
+          path: .theos/obj/debug/8ball-pool.dylib
 
