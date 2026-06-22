@@ -1,11 +1,10 @@
-#import <substrate.h>
-#import <UIKit/UIKit.h>
-#import <Foundation/Foundation.h>
-#import <dlfcn.h>
-#import <mach-o/dyld.h>
-#import <limits.h>
-#import <string.h>
-#import <dispatch/dispatch.h>
+#include <substrate.h>
+#include <dlfcn.h>
+#include <mach-o/dyld.h>
+#include <limits.h>
+#include <string.h>
+#include <dispatch/dispatch.h>
+#include <Foundation/Foundation.h>
 
 // ─── Originals ────────────────────────────────────────────────────────────────
 static BOOL (*orig_BatteryIsActive)(void);
@@ -16,22 +15,30 @@ static BOOL (*orig_StoreIsActive)(void);
 static int  (*orig_StoreRemainingSeconds)(void);
 static void (*orig_StoreBootstrap)(void);
 static void (*orig_StoreGrantFromReward)(void);
+static void (*orig_LibloaderBypassInstall)(void);
+static void (*orig_PlistSpoofInstall)(void);
 
-// ─── Hooks ────────────────────────────────────────────────────────────────────
+// ─── Battery Hooks ────────────────────────────────────────────────────────────
+// 0x10ad9c
 static BOOL hook_BatteryIsActive(void)         { return YES;     }
+// 0x10ada0
 static int  hook_BatteryRemainingSeconds(void) { return INT_MAX; }
+// 0x10da4c
 static BOOL hook_StoreIsActive(void)           { return YES;     }
+// 0x10db24
 static int  hook_StoreRemainingSeconds(void)   { return INT_MAX; }
+// 0x10dbf8
 static void hook_StoreGrantFromReward(void)    {                 }
 
+// 0x10d4a8
 static void hook_StoreBootstrap(void) {
     if (orig_StoreBootstrap) orig_StoreBootstrap();
 }
-
+// 0x10ada4
 static void hook_BatteryOnGrant(void) {
     if (orig_BatteryOnGrant) orig_BatteryOnGrant();
 }
-
+// 0x10add0 — skip ad, fire grant directly
 static void hook_BatteryShowRewarded(void) {
     void (*grantFn)(void) = orig_BatteryOnGrant;
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -39,43 +46,60 @@ static void hook_BatteryShowRewarded(void) {
     });
 }
 
-// ─── Symbol resolver (no block captures) ─────────────────────────────────────
+// ─── Bypass Hooks ─────────────────────────────────────────────────────────────
+// 0x63018 — let bypass install run normally, it's our friend
+static void hook_LibloaderBypassInstall(void) {
+    if (orig_LibloaderBypassInstall) orig_LibloaderBypassInstall();
+}
+// 0x10ea38 — let plist spoof run normally
+static void hook_PlistSpoofInstall(void) {
+    if (orig_PlistSpoofInstall) orig_PlistSpoofInstall();
+}
+
+// ─── Image finder ─────────────────────────────────────────────────────────────
 static void *find80poolHandle(void) {
     uint32_t count = _dyld_image_count();
-    for (uint32_t i = 0; i < count; i++) {
-        const char *name = _dyld_get_image_name(i);
-        if (name && strstr(name, "80pool")) {
-            return dlopen(name, RTLD_NOLOAD | RTLD_LAZY);
+    uint32_t i;
+    for (i = 0; i < count; i++) {
+        const char *imgName = _dyld_get_image_name(i);
+        if (imgName && strstr(imgName, "80pool")) {
+            return dlopen(imgName, RTLD_NOLOAD | RTLD_LAZY);
         }
     }
     return NULL;
 }
 
+// ─── Hook installer ───────────────────────────────────────────────────────────
 static void installHooks(void) {
     void *handle = find80poolHandle();
-    if (!handle) {
-        NSLog(@"[80pool-patch] image not found");
-        return;
-    }
+    if (!handle) return;
 
-    #define HOOK(sym, hookfn, origptr) do { \
-        void *_sym = dlsym(handle, sym);    \
-        if (_sym) MSHookFunction(_sym, (void *)(hookfn), (void **)(origptr)); \
-    } while(0)
+    // Battery gate
+    void *symIsActive    = dlsym(handle, "GBModBatteryIsActive");
+    void *symRemSec      = dlsym(handle, "GBModBatteryRemainingSeconds");
+    void *symOnGrant     = dlsym(handle, "GBModBatteryOnGrant");
+    void *symShowRew     = dlsym(handle, "GBModBatteryShowRewarded");
+    void *symStoreActive = dlsym(handle, "GBModBatteryStoreIsActive");
+    void *symStoreRem    = dlsym(handle, "GBModBatteryStoreRemainingSeconds");
+    void *symStoreBoot   = dlsym(handle, "GBModBatteryStoreBootstrap");
+    void *symStoreGrant  = dlsym(handle, "GBModBatteryStoreGrantFromReward");
 
-    HOOK("GBModBatteryIsActive",             hook_BatteryIsActive,        &orig_BatteryIsActive);
-    HOOK("GBModBatteryRemainingSeconds",     hook_BatteryRemainingSeconds, &orig_BatteryRemainingSeconds);
-    HOOK("GBModBatteryOnGrant",              hook_BatteryOnGrant,         &orig_BatteryOnGrant);
-    HOOK("GBModBatteryShowRewarded",         hook_BatteryShowRewarded,    &orig_BatteryShowRewarded);
-    HOOK("GBModBatteryStoreIsActive",        hook_StoreIsActive,          &orig_StoreIsActive);
-    HOOK("GBModBatteryStoreRemainingSeconds",hook_StoreRemainingSeconds,  &orig_StoreRemainingSeconds);
-    HOOK("GBModBatteryStoreBootstrap",       hook_StoreBootstrap,         &orig_StoreBootstrap);
-    HOOK("GBModBatteryStoreGrantFromReward", hook_StoreGrantFromReward,   &orig_StoreGrantFromReward);
+    // Bypass + spoof
+    void *symBypass      = dlsym(handle, "GBLibloaderBypassInstall");
+    void *symSpoof       = dlsym(handle, "GBPlistSpoofInstall");
 
-    #undef HOOK
+    if (symIsActive)    MSHookFunction(symIsActive,    (void *)hook_BatteryIsActive,        (void **)&orig_BatteryIsActive);
+    if (symRemSec)      MSHookFunction(symRemSec,      (void *)hook_BatteryRemainingSeconds, (void **)&orig_BatteryRemainingSeconds);
+    if (symOnGrant)     MSHookFunction(symOnGrant,     (void *)hook_BatteryOnGrant,          (void **)&orig_BatteryOnGrant);
+    if (symShowRew)     MSHookFunction(symShowRew,     (void *)hook_BatteryShowRewarded,     (void **)&orig_BatteryShowRewarded);
+    if (symStoreActive) MSHookFunction(symStoreActive, (void *)hook_StoreIsActive,           (void **)&orig_StoreIsActive);
+    if (symStoreRem)    MSHookFunction(symStoreRem,    (void *)hook_StoreRemainingSeconds,   (void **)&orig_StoreRemainingSeconds);
+    if (symStoreBoot)   MSHookFunction(symStoreBoot,   (void *)hook_StoreBootstrap,          (void **)&orig_StoreBootstrap);
+    if (symStoreGrant)  MSHookFunction(symStoreGrant,  (void *)hook_StoreGrantFromReward,    (void **)&orig_StoreGrantFromReward);
+    if (symBypass)      MSHookFunction(symBypass,      (void *)hook_LibloaderBypassInstall,  (void **)&orig_LibloaderBypassInstall);
+    if (symSpoof)       MSHookFunction(symSpoof,       (void *)hook_PlistSpoofInstall,       (void **)&orig_PlistSpoofInstall);
+
     dlclose(handle);
-
-    NSLog(@"[80pool-patch] battery hooks live — unlimited, no ads");
 }
 
 // ─── Constructor ──────────────────────────────────────────────────────────────
