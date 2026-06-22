@@ -18,11 +18,6 @@ static int  (*orig_StoreRemainingSeconds)(void);
 static void (*orig_StoreBootstrap)(void);
 static void (*orig_StoreGrantFromReward)(void);
 static void (*orig_LibloaderBypassInstall)(void);
-static void (*orig_AppStoreCheck)(void);
-static void (*orig_GBAuto_SetConfig)(void);
-static void (*orig_GBAuto_Reset)(void);
-static void (*orig_GBOverlayStartIfNeeded)(void);
-static void (*orig_GBOverlaySetModUIHidden)(BOOL);
 
 // ─── Battery Hooks ────────────────────────────────────────────────────────────
 static BOOL hook_BatteryIsActive(void)         { return YES;     }
@@ -30,7 +25,6 @@ static int  hook_BatteryRemainingSeconds(void) { return INT_MAX; }
 static BOOL hook_StoreIsActive(void)           { return YES;     }
 static int  hook_StoreRemainingSeconds(void)   { return INT_MAX; }
 static void hook_StoreGrantFromReward(void)    {                 }
-static void hook_AppStoreCheck(void)           {                 }
 
 static void hook_StoreBootstrap(void) {
     if (orig_StoreBootstrap) orig_StoreBootstrap();
