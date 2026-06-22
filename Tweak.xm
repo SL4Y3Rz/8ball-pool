@@ -125,10 +125,10 @@ static UIButton *makeButton(NSString *title, CGFloat y, SEL action, id target) {
     // Fire GBAuto via 80pool handle
     if (gHandle) {
         if (btn.selected) {
-            void (*startFn)(void) = dlsym(gHandle, "GBAuto_OnPlayerTurn");
+            void (*startFn)(void) = (void (*)(void))dlsym(gHandle, "GBAuto_OnPlayerTurn");
             if (startFn) startFn();
         } else {
-            void (*stopFn)(void) = dlsym(gHandle, "GBAuto_Reset");
+            void (*stopFn)(void) = (void (*)(void))dlsym(gHandle, "GBAuto_Reset");
             if (stopFn) stopFn();
         }
     }
@@ -142,14 +142,14 @@ static UIButton *makeButton(NSString *title, CGFloat y, SEL action, id target) {
     [btn setTitle:btn.selected ? @"👁 Overlay: ON" : @"👁 Overlay: OFF"
          forState:UIControlStateNormal];
     if (gHandle) {
-        void (*overlayFn)(BOOL) = dlsym(gHandle, "GBOverlaySetModUIHidden");
+        void (*overlayFn)(BOOL) = (void (*)(BOOL))dlsym(gHandle, "GBOverlaySetModUIHidden");
         if (overlayFn) overlayFn(!btn.selected);
     }
 }
 
 + (void)onReset:(UIButton *)btn {
     if (gHandle) {
-        void (*resetFn)(void) = dlsym(gHandle, "GBAuto_Reset");
+        void (*resetFn)(void) = (void (*)(void))dlsym(gHandle, "GBAuto_Reset");
         if (resetFn) resetFn();
     }
 }
