@@ -17,7 +17,6 @@ static int  (*orig_StoreRemainingSeconds)(void);
 static void (*orig_StoreBootstrap)(void);
 static void (*orig_StoreGrantFromReward)(void);
 static void (*orig_LibloaderBypassInstall)(void);
-static void (*orig_PlistSpoofInstall)(void);
 static void (*orig_AppStoreCheck)(void);
 
 // ─── Battery Hooks ────────────────────────────────────────────────────────────
@@ -43,9 +42,6 @@ static void hook_BatteryShowRewarded(void) {
 // ─── Bypass Hooks ─────────────────────────────────────────────────────────────
 static void hook_LibloaderBypassInstall(void) {
     if (orig_LibloaderBypassInstall) orig_LibloaderBypassInstall();
-}
-static void hook_PlistSpoofInstall(void) {
-    if (orig_PlistSpoofInstall) orig_PlistSpoofInstall();
 }
 static void hook_AppStoreCheck(void) { }
 
