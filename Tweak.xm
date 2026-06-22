@@ -110,3 +110,51 @@ static void installHooks(void) {
         ^{ installHooks(); }
     );
 }
+
+// Add this to your existing Tweak.xm installHooks()
+
+static void (*orig_AppStoreCheck)(void);
+static BOOL (*orig_IsValidInstall)(void);
+static BOOL (*orig_IsFromAppStore)(void);
+
+// Kill the "cannot be installed from unofficial app stores" check
+static void hook_AppStoreCheck(void)    {                }
+static BOOL hook_IsValidInstall(void)   { return YES;    }
+static BOOL hook_IsFromAppStore(void)   { return YES;    }
+
+// Hook NSBundle receipt validation — this is what triggers REF: 6902
+%hook NSBundle
+- (NSURL *)appStoreReceiptURL {
+    // Return a fake path that passes existence check
+    return [NSURL fileURLWithPath:@"/private/var/mobile/Containers/Bundle/Application/receipt"];
+}
+%end
+
+// Hook the actual Miniclip integrity alert
+%hook UIAlertController
++ (instancetype)alertControllerWithTitle:(NSString *)title
+                                 message:(NSString *)message
+                          preferredStyle:(UIAlertControllerStyle)style {
+    // Swallow the sideload detection popup
+    if (message && [message containsString:@"unofficial app"]) {
+        return nil;
+    }
+    if (message && [message containsString:@"8350:C7BE"]) {
+        return nil;
+    }
+    return %orig;
+}
+%end
+
+// Hook SecStaticCodeCheckValidity — the system call behind REF 6902
+%hook NSFileManager
+- (BOOL)fileExistsAtPath:(NSString *)path {
+    // Fake the receipt file exists
+    if ([path containsString:@"StoreKit"] ||
+        [path containsString:@"receipt"]) {
+        return YES;
+    }
+    return %orig;
+}
+%end
+
