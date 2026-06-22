@@ -5,6 +5,7 @@
 #include <string.h>
 #include <dispatch/dispatch.h>
 #include <Foundation/Foundation.h>
+#include <UIKit/UIKit.h>
 
 // ─── Originals ────────────────────────────────────────────────────────────────
 static BOOL (*orig_BatteryIsActive)(void);
@@ -17,28 +18,21 @@ static void (*orig_StoreBootstrap)(void);
 static void (*orig_StoreGrantFromReward)(void);
 static void (*orig_LibloaderBypassInstall)(void);
 static void (*orig_PlistSpoofInstall)(void);
+static void (*orig_AppStoreCheck)(void);
 
 // ─── Battery Hooks ────────────────────────────────────────────────────────────
-// 0x10ad9c
 static BOOL hook_BatteryIsActive(void)         { return YES;     }
-// 0x10ada0
 static int  hook_BatteryRemainingSeconds(void) { return INT_MAX; }
-// 0x10da4c
 static BOOL hook_StoreIsActive(void)           { return YES;     }
-// 0x10db24
 static int  hook_StoreRemainingSeconds(void)   { return INT_MAX; }
-// 0x10dbf8
 static void hook_StoreGrantFromReward(void)    {                 }
 
-// 0x10d4a8
 static void hook_StoreBootstrap(void) {
     if (orig_StoreBootstrap) orig_StoreBootstrap();
 }
-// 0x10ada4
 static void hook_BatteryOnGrant(void) {
     if (orig_BatteryOnGrant) orig_BatteryOnGrant();
 }
-// 0x10add0 — skip ad, fire grant directly
 static void hook_BatteryShowRewarded(void) {
     void (*grantFn)(void) = orig_BatteryOnGrant;
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -47,14 +41,38 @@ static void hook_BatteryShowRewarded(void) {
 }
 
 // ─── Bypass Hooks ─────────────────────────────────────────────────────────────
-// 0x63018 — let bypass install run normally, it's our friend
 static void hook_LibloaderBypassInstall(void) {
     if (orig_LibloaderBypassInstall) orig_LibloaderBypassInstall();
 }
-// 0x10ea38 — let plist spoof run normally
 static void hook_PlistSpoofInstall(void) {
     if (orig_PlistSpoofInstall) orig_PlistSpoofInstall();
 }
+static void hook_AppStoreCheck(void) { }
+
+// ─── Sideload Detection Kill ──────────────────────────────────────────────────
+%hook NSBundle
+- (NSURL *)appStoreReceiptURL {
+    return [NSURL fileURLWithPath:@"/private/var/mobile/Containers/Bundle/Application/receipt"];
+}
+%end
+
+%hook UIAlertController
++ (instancetype)alertControllerWithTitle:(NSString *)title
+                                 message:(NSString *)message
+                          preferredStyle:(UIAlertControllerStyle)style {
+    if (message && [message containsString:@"unofficial app"]) return nil;
+    if (message && [message containsString:@"8350:C7BE"])      return nil;
+    return %orig;
+}
+%end
+
+%hook NSFileManager
+- (BOOL)fileExistsAtPath:(NSString *)path {
+    if ([path containsString:@"StoreKit"] ||
+        [path containsString:@"receipt"]) return YES;
+    return %orig;
+}
+%end
 
 // ─── Image finder ─────────────────────────────────────────────────────────────
 static void *find80poolHandle(void) {
@@ -84,7 +102,7 @@ static void installHooks(void) {
     void *symStoreBoot   = dlsym(handle, "GBModBatteryStoreBootstrap");
     void *symStoreGrant  = dlsym(handle, "GBModBatteryStoreGrantFromReward");
 
-    // Bypass + spoof
+    // Bypass + spoof + sideload check
     void *symBypass      = dlsym(handle, "GBLibloaderBypassInstall");
     void *symSpoof       = dlsym(handle, "GBPlistSpoofInstall");
 
@@ -97,7 +115,7 @@ static void installHooks(void) {
     if (symStoreBoot)   MSHookFunction(symStoreBoot,   (void *)hook_StoreBootstrap,          (void **)&orig_StoreBootstrap);
     if (symStoreGrant)  MSHookFunction(symStoreGrant,  (void *)hook_StoreGrantFromReward,    (void **)&orig_StoreGrantFromReward);
     if (symBypass)      MSHookFunction(symBypass,      (void *)hook_LibloaderBypassInstall,  (void **)&orig_LibloaderBypassInstall);
-    if (symSpoof)       MSHookFunction(symSpoof,       (void *)hook_PlistSpoofInstall,       (void **)&orig_PlistSpoofInstall);
+    if (symSpoof)       MSHookFunction(symSpoof,       (void *)hook_AppStoreCheck,           (void **)&orig_AppStoreCheck);
 
     dlclose(handle);
 }
@@ -110,51 +128,3 @@ static void installHooks(void) {
         ^{ installHooks(); }
     );
 }
-
-// Add this to your existing Tweak.xm installHooks()
-
-static void (*orig_AppStoreCheck)(void);
-static BOOL (*orig_IsValidInstall)(void);
-static BOOL (*orig_IsFromAppStore)(void);
-
-// Kill the "cannot be installed from unofficial app stores" check
-static void hook_AppStoreCheck(void)    {                }
-static BOOL hook_IsValidInstall(void)   { return YES;    }
-static BOOL hook_IsFromAppStore(void)   { return YES;    }
-
-// Hook NSBundle receipt validation — this is what triggers REF: 6902
-%hook NSBundle
-- (NSURL *)appStoreReceiptURL {
-    // Return a fake path that passes existence check
-    return [NSURL fileURLWithPath:@"/private/var/mobile/Containers/Bundle/Application/receipt"];
-}
-%end
-
-// Hook the actual Miniclip integrity alert
-%hook UIAlertController
-+ (instancetype)alertControllerWithTitle:(NSString *)title
-                                 message:(NSString *)message
-                          preferredStyle:(UIAlertControllerStyle)style {
-    // Swallow the sideload detection popup
-    if (message && [message containsString:@"unofficial app"]) {
-        return nil;
-    }
-    if (message && [message containsString:@"8350:C7BE"]) {
-        return nil;
-    }
-    return %orig;
-}
-%end
-
-// Hook SecStaticCodeCheckValidity — the system call behind REF 6902
-%hook NSFileManager
-- (BOOL)fileExistsAtPath:(NSString *)path {
-    // Fake the receipt file exists
-    if ([path containsString:@"StoreKit"] ||
-        [path containsString:@"receipt"]) {
-        return YES;
-    }
-    return %orig;
-}
-%end
-
