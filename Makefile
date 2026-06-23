@@ -1,13 +1,19 @@
-ARCHS  = arm64
-TARGET = iphone:clang:latest:14.0
+THEOS_PACKAGE_SCHEME = rootless
+TARGET = iphone:clang:16.5:14.0
+INSTALL_TARGET_PROCESSES = MiniclipPool
 
 include $(THEOS)/makefiles/common.mk
 
-TWEAK_NAME                 = 80poolUnlimited
-80poolUnlimited_FILES      = Tweak.xm
-80poolUnlimited_FRAMEWORKS = UIKit Foundation
-80poolUnlimited_LIBRARIES  = substrate
-80poolUnlimited_FRAMEWORKS = UIKit Foundation Security
+TWEAK_NAME = AxiomPool
 
+AxiomPool_FILES = Tweak.xm
+AxiomPool_CFLAGS = -fobjc-arc -Wno-unused-variable
+AxiomPool_CCFLAGS = -std=c++17
+AxiomPool_FRAMEWORKS = UIKit CoreGraphics QuartzCore
+AxiomPool_PRIVATE_FRAMEWORKS = GraphicsServices
+AxiomPool_LIBRARIES = substrate
 
-include $(THEOS_MAKE_PATH)/tweak.mk
+# ── embed assets into final dylib ──────────────────────────
+AxiomPool_RESOURCE_FILES = assets/
+
+include $(THEOS)/makefiles/tweak.mk
