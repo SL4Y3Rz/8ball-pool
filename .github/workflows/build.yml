@@ -1,25 +1,127 @@
-name: Build Tweak
+name: Build dylib
 
-on: [push]
+on:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: write
 
 jobs:
   build:
     runs-on: macos-latest
+
     steps:
       - uses: actions/checkout@v3
 
       - name: Install Theos
         run: |
-          bash -c "$(curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos)"
+          brew install ldid xz python3
+          git clone --recursive https://github.com/theos/theos.git ~/theos
+          mkdir -p ~/theos/sdks
+          curl -L --output /tmp/sdks.zip \
+            "https://github.com/theos/sdks/archive/refs/heads/master.zip"
+          unzip -q /tmp/sdks.zip -d /tmp/sdks
+          mv /tmp/sdks/sdks-master/*.sdk ~/theos/sdks/
 
       - name: Generate Assets
-        run: python3 generate_assets.py
+        run: |
+          mkdir -p assets/textures
+          python3 - <<'EOF'
+          import math, os
+
+          os.makedirs("assets/textures", exist_ok=True)
+
+          def circle_texture(size=64, name="dot_64"):
+              cx = cy = size / 2
+              data = []
+              for y in range(size):
+                  for x in range(size):
+                      dx = x - cx
+                      dy = y - cy
+                      dist = math.sqrt(dx*dx + dy*dy)
+                      r = size / 2
+                      if dist < r - 2:
+                          a = 255
+                      elif dist < r:
+                          a = int(255 * (r - dist) / 2)
+                      else:
+                          a = 0
+                      data += [255, 255, 255, a]
+              with open(f"assets/textures/{name}.h", "w") as f:
+                  f.write(", ".join(str(b) for b in data))
+
+          def line_texture(size=64, name="line_64"):
+              data = []
+              for y in range(size):
+                  for x in range(size):
+                      cx = size / 2
+                      dist = abs(x - cx)
+                      a = max(0, int(255 * (1 - dist / (size * 0.08))))
+                      data += [255, 255, 255, a]
+              with open(f"assets/textures/{name}.h", "w") as f:
+                  f.write(", ".join(str(b) for b in data))
+
+          def pocket_texture(size=64, name="pocket_64"):
+              cx = cy = size / 2
+              data = []
+              for y in range(size):
+                  for x in range(size):
+                      dx = x - cx
+                      dy = y - cy
+                      dist = math.sqrt(dx*dx + dy*dy)
+                      outer = size / 2
+                      inner = size / 2 - 6
+                      if inner < dist < outer:
+                          a = 200
+                      elif dist <= inner:
+                          a = 60
+                      else:
+                          a = 0
+                      data += [100, 200, 255, a]
+              with open(f"assets/textures/{name}.h", "w") as f:
+                  f.write(", ".join(str(b) for b in data))
+
+          def arrow_texture(size=64, name="arrow_64"):
+              data = []
+              for y in range(size):
+                  for x in range(size):
+                      nx = x / size
+                      ny = y / size
+                      in_body = (0.4 < nx < 0.6 and 0.3 < ny < 0.8)
+                      in_head = (ny < 0.35 and abs(nx - 0.5) < (0.35 - ny) * 1.2)
+                      a = 220 if (in_body or in_head) else 0
+                      data += [255, 255, 100, a]
+              with open(f"assets/textures/{name}.h", "w") as f:
+                  f.write(", ".join(str(b) for b in data))
+
+          circle_texture()
+          line_texture()
+          pocket_texture()
+          arrow_texture()
+          print("Assets generated.")
+          EOF
 
       - name: Build
-        run: make clean && make
+        run: |
+          export THEOS=~/theos
+          export THEOS_MAKE_PATH=~/theos/makefiles
+          make FINALPACKAGE=1 STRIP=1
 
-      - name: Upload DEB
-        uses: actions/upload-artifact@v4
+      - name: Find and copy dylib
+        run: |
+          mkdir -p output
+          find .theos -name "*.dylib" -exec cp {} output/80poolUnlimited.dylib \;
+
+      - name: Show dylib size
+        run: |
+          ls -lh output/80poolUnlimited.dylib
+
+      - name: Release
+        uses: softprops/action-gh-release@v1
         with:
-          name: axiom-pool
-          path: packages/*.deb
+          tag_name: v1.0.${{ github.run_number }}
+          name: 80pool Unlimited v1.0.${{ github.run_number }}
+          files: output/80poolUnlimited.dylib
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
