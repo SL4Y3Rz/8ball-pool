@@ -605,26 +605,46 @@ static void loadPrefs(void) {
 %ctor {
     loadPrefs();
 
-    // ── detection bypass fires immediately before %init ──
-    installBypassHooks();
-
+    // %init FIRST — then hooks after process settles
     %init;
 
     dispatch_after(
-        dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
+        dispatch_time(DISPATCH_TIME_NOW,
+            (int64_t)(0.5 * NSEC_PER_SEC)),
         dispatch_get_main_queue(), ^{
+
+            // bypass installs after runtime is stable
+            installBypassHooks();
+        });
+
+    dispatch_after(
+        dispatch_time(DISPATCH_TIME_NOW,
+            (int64_t)(1.5 * NSEC_PER_SEC)),
+        dispatch_get_main_queue(), ^{
+
             UIWindowScene *scene = nil;
             for (UIWindowScene *s in
-                 [UIApplication sharedApplication].connectedScenes) {
-                if (s.activationState == UISceneActivationStateForegroundActive) {
-                    scene = s; break;
+                 [UIApplication sharedApplication]
+                 .connectedScenes) {
+                if (s.activationState ==
+                    UISceneActivationStateForegroundActive) {
+                    scene = s;
+                    break;
                 }
             }
+
             CGRect screen = [UIScreen mainScreen].bounds;
-            gMenuWindow = [[AXMenuWindow alloc] initWithFrame:screen];
-            if (scene) gMenuWindow.windowScene = scene;
+            gMenuWindow   = [[AXMenuWindow alloc]
+                initWithFrame:screen];
+
+            if (scene) {
+                gMenuWindow.windowScene = scene;
+            }
+
             gMenuWindow.hidden = NO;
             [gMenuWindow makeKeyAndVisible];
-            NSLog(@"[AXIOM] v2.1 loaded — bypass active, battery dead, UI live");
+
+            NSLog(@"[AXIOM] v2.2 loaded — "
+                  @"bypass active, battery dead, UI live");
         });
 }
