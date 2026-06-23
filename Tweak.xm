@@ -1,6 +1,6 @@
 // ============================================================
 // Tweak.xm — 80pool.dylib MobileSubstrate Tweak
-// Full UI, battery bypass, prediction overlay
+// Full UI, battery bypass, prediction overlay, ad blocker
 // Target size: ~1.8mb via embedded assets + full feature set
 // ============================================================
 
@@ -95,6 +95,37 @@ static void setPref(NSString *key, id value) {
    wrongBallAlertEnabled:(BOOL)wrongBall
               flashPhase:(CGFloat)flash;
 @end
+
+// ─── GENERIC AD BLOCKER ──────────────────────────────────────
+// Blocks any view/controller with "Ad", "Banner", "GAD", etc. in the class name.
+
+%hook UIView
+- (void)addSubview:(UIView *)view {
+    NSString *cls = NSStringFromClass([view class]);
+    if ([cls rangeOfString:@"Ad" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+        [cls rangeOfString:@"Banner" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+        [cls rangeOfString:@"GAD" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+        [cls rangeOfString:@"Unity" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+        [cls rangeOfString:@"AppLovin" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+        NSLog(@"[AXIOM] Blocked ad subview: %@", cls);
+        return; // Skip adding it
+    }
+    %orig;
+}
+%end
+
+%hook UIViewController
+- (void)presentViewController:(UIViewController *)vc animated:(BOOL)flag completion:(void (^)(void))block {
+    NSString *cls = NSStringFromClass([vc class]);
+    if ([cls rangeOfString:@"Ad" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+        [cls rangeOfString:@"Interstitial" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+        [cls rangeOfString:@"Reward" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+        NSLog(@"[AXIOM] Blocked ad popup: %@", cls);
+        return; // Don't show it
+    }
+    %orig;
+}
+%end
 
 // ─── UI COMPONENTS ───────────────────────────────────────────
 
@@ -399,7 +430,13 @@ static void setPref(NSString *key, id value) {
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (!self) return nil;
-    self.windowLevel = UIWindowLevelAlert + 100;
+    
+    // FIX: Added rootViewController to prevent touch/orientation glitches
+    self.rootViewController = [[UIViewController alloc] init];
+    
+    // FIX: Lowered window level to avoid blocking system alerts (was +100)
+    self.windowLevel = UIWindowLevelAlert + 1;
+    
     self.backgroundColor = [UIColor clearColor];
     self.userInteractionEnabled = YES;
     [self buildUI];
@@ -676,6 +713,9 @@ static void setPref(NSString *key, id value) {
 
 - (void)toggleMenu {
     if (_menuVisible) {
+        // Bonus: stop pulse animation when hidden to save tiny CPU
+        [_statusBar.dot.layer removeAllAnimations];
+        
         [UIView animateWithDuration:0.25
                               delay:0
                             options:UIViewAnimationOptionCurveEaseIn
@@ -823,6 +863,36 @@ static void loadPrefs(void) {
     loadPrefs();
     %init;
 
+    // ─── RUNTIME CLASS DUMPER ──────────────────────────────
+    // This runs 4 seconds after launch to log all ad-related class names.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        int numClasses = objc_getClassList(NULL, 0);
+        Class *classes = (Class *)malloc(sizeof(Class) * numClasses);
+        numClasses = objc_getClassList(classes, numClasses);
+        
+        NSMutableArray *adClasses = [NSMutableArray array];
+        for (int i = 0; i < numClasses; i++) {
+            NSString *name = NSStringFromClass(classes[i]);
+            if ([name rangeOfString:@"Ad" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+                [name rangeOfString:@"Banner" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+                [name rangeOfString:@"GAD" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+                [name rangeOfString:@"Unity" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+                [name rangeOfString:@"AppLovin" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+                [name rangeOfString:@"IronSource" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+                [adClasses addObject:name];
+            }
+        }
+        free(classes);
+        
+        NSLog(@"=========================================");
+        NSLog(@"[AXIOM] POTENTIAL AD CLASSES FOUND:");
+        for (NSString *clsName in adClasses) {
+            NSLog(@"[AXIOM] - %@", clsName);
+        }
+        NSLog(@"=========================================");
+    });
+
+    // ─── WINDOW CREATION ────────────────────────────────────
     dispatch_after(
         dispatch_time(DISPATCH_TIME_NOW,
                       (int64_t)(1.5 * NSEC_PER_SEC)),
@@ -851,6 +921,6 @@ static void loadPrefs(void) {
         [gMenuWindow makeKeyAndVisible];
 
         NSLog(@"[AXIOM] loaded — battery gate dead, "
-              @"UI live, prefs active");
+              @"UI live, prefs active, ads blocked");
     });
 }
