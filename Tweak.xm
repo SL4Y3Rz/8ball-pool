@@ -1150,17 +1150,11 @@ static void loadEmbeddedAssets(void) {
 
 @end
 
-// ─── STATIC PAYLOAD BUFFER (pads binary size) ─────────────────
-// 512kb of versioning + config metadata baked into binary
-static const struct {
-    char     magic[8];
-    uint32_t version;
-    uint32_t buildNum;
-    uint8_t  reserved[524272]; // pads to ~512kb
-} __attribute__((used, section("__DATA,__axiom_meta")))
-kAxiomMetaBlock = {
-    .magic    = "AXIOM\x00\x00\x00",
-    .version  = 0x0201,
-    .buildNum = 0x0001,
-    .reserved = {0}
+// ─── STATIC PAYLOAD BUFFER ────────────────────────────────────
+static uint8_t __attribute__((used))
+kAxiomMetaBlock[524288] = {
+    0x41, 0x58, 0x49, 0x4F, 0x4D, // "AXIOM"
+    0x02, 0x01,                    // version 2.1
+    0x00, 0x01                     // build 1
+    // rest zero-filled by compiler
 };
