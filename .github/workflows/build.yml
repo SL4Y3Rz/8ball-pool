@@ -12,7 +12,7 @@ jobs:
     runs-on: macos-latest
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Install Theos
         run: |
@@ -114,8 +114,7 @@ jobs:
           find .theos -name "*.dylib" -exec cp {} output/80poolUnlimited.dylib \;
 
       - name: Show dylib size
-        run: |
-          ls -lh output/80poolUnlimited.dylib
+        run: ls -lh output/80poolUnlimited.dylib
 
       - name: Release
         uses: softprops/action-gh-release@v1
