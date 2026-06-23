@@ -1,386 +1,856 @@
-#include <substrate.h>
-#include <dlfcn.h>
-#include <mach-o/dyld.h>
-#include <limits.h>
-#include <string.h>
-#include <dispatch/dispatch.h>
-#include <Foundation/Foundation.h>
-#include <UIKit/UIKit.h>
-#include <CoreGraphics/CoreGraphics.h>
+// ============================================================
+// Tweak.xm — 80pool.dylib MobileSubstrate Tweak
+// Full UI, battery bypass, prediction overlay
+// Target size: ~1.8mb via embedded assets + full feature set
+// ============================================================
 
-// ─── State ────────────────────────────────────────────────────────────────────
-static BOOL  autoAimEnabled  = NO;
-static BOOL  overlayEnabled  = NO;
-static void *gHandle         = NULL;
-static UIWindow *floatWindow = nil;
-static UIWindow *menuWindow  = nil;
-static UIView   *menuView    = nil;
-static BOOL      menuVisible = NO;
+#import <substrate.h>
+#import <UIKit/UIKit.h>
+#import <QuartzCore/QuartzCore.h>
+#import <CoreGraphics/CoreGraphics.h>
+#import <objc/runtime.h>
 
-// ─── Originals ────────────────────────────────────────────────────────────────
-static BOOL (*orig_BatteryIsActive)(void);
-static int  (*orig_BatteryRemainingSeconds)(void);
-static void (*orig_BatteryOnGrant)(void);
-static void (*orig_BatteryShowRewarded)(void);
-static BOOL (*orig_StoreIsActive)(void);
-static int  (*orig_StoreRemainingSeconds)(void);
-static void (*orig_StoreBootstrap)(void);
-static void (*orig_StoreGrantFromReward)(void);
-static void (*orig_LibloaderBypassInstall)(void);
+// ─── CONSTANTS ───────────────────────────────────────────────
 
-// ─── Battery Hooks ────────────────────────────────────────────────────────────
-static BOOL hook_BatteryIsActive(void)         { return YES;     }
-static int  hook_BatteryRemainingSeconds(void) { return INT_MAX; }
-static BOOL hook_StoreIsActive(void)           { return YES;     }
-static int  hook_StoreRemainingSeconds(void)   { return INT_MAX; }
-static void hook_StoreGrantFromReward(void)    {                 }
-static void hook_StoreBootstrap(void) {
-    if (orig_StoreBootstrap) orig_StoreBootstrap();
-}
-static void hook_BatteryOnGrant(void) {
-    if (orig_BatteryOnGrant) orig_BatteryOnGrant();
-}
-static void hook_BatteryShowRewarded(void) {
-    void (*grantFn)(void) = orig_BatteryOnGrant;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (grantFn) grantFn();
-    });
-}
-static void hook_LibloaderBypassInstall(void) {
-    if (orig_LibloaderBypassInstall) orig_LibloaderBypassInstall();
-}
+#define kTweakID        @"com.axiom.80pool"
+#define kMenuWidth      280.0f
+#define kMenuHeight     520.0f
+#define kCornerRadius   16.0f
+#define kAccentColor    [UIColor colorWithRed:0.18 \
+                        green:0.62 blue:1.0 alpha:1.0]
+#define kBGColor        [UIColor colorWithRed:0.08 \
+                        green:0.08 blue:0.12 alpha:0.97]
+#define kCardColor      [UIColor colorWithRed:0.13 \
+                        green:0.13 blue:0.18 alpha:1.0]
+#define kTextColor      [UIColor whiteColor]
+#define kSubtextColor   [UIColor colorWithWhite:0.6 alpha:1.0]
+#define kGreenColor     [UIColor colorWithRed:0.2 \
+                        green:0.85 blue:0.4 alpha:1.0]
+#define kRedColor       [UIColor colorWithRed:1.0 \
+                        green:0.3 blue:0.3 alpha:1.0]
 
-// ─── Sideload Detection Kill ──────────────────────────────────────────────────
-%hook NSBundle
-- (NSURL *)appStoreReceiptURL {
-    return [NSURL fileURLWithPath:@"/private/var/mobile/Containers/Bundle/Application/receipt"];
-}
-%end
+// ─── PREFERENCES KEYS ────────────────────────────────────────
 
-%hook UIAlertController
-+ (instancetype)alertControllerWithTitle:(NSString *)title
-                                 message:(NSString *)message
-                          preferredStyle:(UIAlertControllerStyle)style {
-    if (message && ([message containsString:@"unofficial app"] ||
-                    [message containsString:@"8350:C7BE"])) return nil;
-    return %orig;
-}
-%end
+static NSString *kPrediction        = @"prediction";
+static NSString *kOpponent          = @"opponent";
+static NSString *kTableBorders      = @"tableBorders";
+static NSString *kPocketHints       = @"pocketHints";
+static NSString *kImpactDots        = @"impactDots";
+static NSString *kAutoAim           = @"autoAim";
+static NSString *kAutoPlay          = @"autoPlay";
+static NSString *kAutoBallInHand    = @"autoBallInHand";
+static NSString *kScratchAlert      = @"scratchAlert";
+static NSString *kWrongBallAlert    = @"wrongBallAlert";
+static NSString *kLineThickness     = @"lineThickness";
+static NSString *kLineOpacity       = @"lineOpacity";
+static NSString *kAutoAimStrength   = @"autoAimStrength";
 
-%hook NSFileManager
-- (BOOL)fileExistsAtPath:(NSString *)path {
-    if ([path containsString:@"StoreKit"] ||
-        [path containsString:@"receipt"]) return YES;
-    return %orig;
-}
-%end
+// ─── STATE ───────────────────────────────────────────────────
 
-// ─── Auto Aim Hook ────────────────────────────────────────────────────────────
-// Hook GBAuto_Tick — fires every frame, we intercept and fire GetSuggestedShot
-static void (*orig_GBAuto_Tick)(void);
-static void hook_GBAuto_Tick(void) {
-    if (autoAimEnabled && gHandle) {
-        void (*suggestFn)(void) = (void (*)(void))dlsym(gHandle, "GBAuto_GetSuggestedShot");
-        if (suggestFn) suggestFn();
-    }
-    if (orig_GBAuto_Tick) orig_GBAuto_Tick();
+static NSMutableDictionary *gPrefs;
+
+static BOOL prefBool(NSString *key, BOOL def) {
+    id val = gPrefs[key];
+    return val ? [val boolValue] : def;
 }
 
-// Hook GBAuto_OnPlayerTurn — fires when it's our turn
-static void (*orig_GBAuto_OnPlayerTurn)(void);
-static void hook_GBAuto_OnPlayerTurn(void) {
-    if (autoAimEnabled && gHandle) {
-        void (*primeFn)(void) = (void (*)(void))dlsym(gHandle, "GBAuto_PrimeForCurrentTurn");
-        if (primeFn) primeFn();
-    }
-    if (orig_GBAuto_OnPlayerTurn) orig_GBAuto_OnPlayerTurn();
+static float prefFloat(NSString *key, float def) {
+    id val = gPrefs[key];
+    return val ? [val floatValue] : def;
 }
 
-// ─── Overlay Hook ─────────────────────────────────────────────────────────────
-static void (*orig_GBOverlaySetModUIHidden)(BOOL);
-static void hook_GBOverlaySetModUIHidden(BOOL hidden) {
-    // If overlay enabled, always force visible
-    if (overlayEnabled) {
-        if (orig_GBOverlaySetModUIHidden) orig_GBOverlaySetModUIHidden(NO);
+static void setPref(NSString *key, id value) {
+    gPrefs[key] = value;
+    [gPrefs writeToFile:
+        [NSString stringWithFormat:
+            @"/var/mobile/Library/Preferences/%@.plist",
+            kTweakID]
+        atomically:YES];
+}
+
+// ─── FORWARD DECLARATIONS ────────────────────────────────────
+
+@interface GBModMenu : NSObject
+- (void)startBatteryRefreshTimer;
+- (void)stopBatteryRefreshTimer;
+- (void)setBatteryRefreshTimer:(id)timer;
+- (id)batteryRefreshTimer;
+- (BOOL)requirePremiumForAutomationToggle:(id)toggle;
+- (void)refreshPremiumBatteryUI;
+- (NSString *)premiumStatusText;
+- (void)applyPremiumLockState;
+@end
+
+@interface GBPredictionDrawView : UIView
+- (void)updateWithResult:(id)result
+       predictionRevision:(NSInteger)rev
+              tableScale:(CGFloat)scale
+            drawBorders:(BOOL)borders
+            drawPockets:(BOOL)pockets
+          drawImpactDots:(BOOL)dots
+           lineThickness:(CGFloat)thickness
+             lineOpacity:(CGFloat)opacity
+               tableRect:(CGRect)rect
+      scratchAlertEnabled:(BOOL)scratch
+   wrongBallAlertEnabled:(BOOL)wrongBall
+              flashPhase:(CGFloat)flash;
+@end
+
+// ─── UI COMPONENTS ───────────────────────────────────────────
+
+@interface AXToggleRow : UIView
+@property (nonatomic, strong) UILabel     *titleLabel;
+@property (nonatomic, strong) UILabel     *subtitleLabel;
+@property (nonatomic, strong) UISwitch    *toggle;
+@property (nonatomic, copy)   NSString    *prefKey;
+@property (nonatomic, copy)   void (^onChange)(BOOL);
+- (instancetype)initWithTitle:(NSString *)title
+                     subtitle:(NSString *)subtitle
+                      prefKey:(NSString *)key
+                     default:(BOOL)def
+                     onChange:(void(^)(BOOL))block;
+@end
+
+@implementation AXToggleRow
+
+- (instancetype)initWithTitle:(NSString *)title
+                     subtitle:(NSString *)subtitle
+                      prefKey:(NSString *)key
+                      default:(BOOL)def
+                     onChange:(void(^)(BOOL))block {
+    self = [super init];
+    if (!self) return nil;
+
+    self.prefKey  = key;
+    self.onChange = block;
+
+    self.backgroundColor = kCardColor;
+    self.layer.cornerRadius = 10.0f;
+    self.layer.masksToBounds = YES;
+
+    _titleLabel = [[UILabel alloc] init];
+    _titleLabel.text = title;
+    _titleLabel.textColor = kTextColor;
+    _titleLabel.font = [UIFont systemFontOfSize:14.0
+                             weight:UIFontWeightMedium];
+    _titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+
+    _subtitleLabel = [[UILabel alloc] init];
+    _subtitleLabel.text = subtitle;
+    _subtitleLabel.textColor = kSubtextColor;
+    _subtitleLabel.font = [UIFont systemFontOfSize:11.0
+                                weight:UIFontWeightRegular];
+    _subtitleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+
+    _toggle = [[UISwitch alloc] init];
+    _toggle.onTintColor = kAccentColor;
+    _toggle.on = prefBool(key, def);
+    _toggle.translatesAutoresizingMaskIntoConstraints = NO;
+    [_toggle addTarget:self
+                action:@selector(toggled:)
+      forControlEvents:UIControlEventValueChanged];
+
+    [self addSubview:_titleLabel];
+    [self addSubview:_subtitleLabel];
+    [self addSubview:_toggle];
+
+    self.translatesAutoresizingMaskIntoConstraints = NO;
+
+    [NSLayoutConstraint activateConstraints:@[
+        [_titleLabel.leadingAnchor
+            constraintEqualToAnchor:self.leadingAnchor
+            constant:12],
+        [_titleLabel.topAnchor
+            constraintEqualToAnchor:self.topAnchor
+            constant:10],
+        [_subtitleLabel.leadingAnchor
+            constraintEqualToAnchor:self.leadingAnchor
+            constant:12],
+        [_subtitleLabel.topAnchor
+            constraintEqualToAnchor:_titleLabel.bottomAnchor
+            constant:2],
+        [_subtitleLabel.bottomAnchor
+            constraintEqualToAnchor:self.bottomAnchor
+            constant:-10],
+        [_toggle.trailingAnchor
+            constraintEqualToAnchor:self.trailingAnchor
+            constant:-12],
+        [_toggle.centerYAnchor
+            constraintEqualToAnchor:self.centerYAnchor],
+    ]];
+    return self;
+}
+
+- (void)toggled:(UISwitch *)sw {
+    setPref(self.prefKey, @(sw.isOn));
+    if (self.onChange) self.onChange(sw.isOn);
+}
+
+@end
+
+// ─── SLIDER ROW ──────────────────────────────────────────────
+
+@interface AXSliderRow : UIView
+@property (nonatomic, strong) UILabel  *titleLabel;
+@property (nonatomic, strong) UILabel  *valueLabel;
+@property (nonatomic, strong) UISlider *slider;
+@property (nonatomic, copy)   NSString *prefKey;
+@end
+
+@implementation AXSliderRow
+
+- (instancetype)initWithTitle:(NSString *)title
+                      prefKey:(NSString *)key
+                          min:(float)minV
+                          max:(float)maxV
+                      default:(float)def {
+    self = [super init];
+    if (!self) return nil;
+
+    self.prefKey = key;
+    self.backgroundColor = kCardColor;
+    self.layer.cornerRadius = 10.0f;
+    self.layer.masksToBounds = YES;
+    self.translatesAutoresizingMaskIntoConstraints = NO;
+
+    _titleLabel = [[UILabel alloc] init];
+    _titleLabel.text = title;
+    _titleLabel.textColor = kTextColor;
+    _titleLabel.font = [UIFont systemFontOfSize:13.0
+                             weight:UIFontWeightMedium];
+    _titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+
+    float current = prefFloat(key, def);
+    _valueLabel = [[UILabel alloc] init];
+    _valueLabel.text = [NSString stringWithFormat:@"%.2f",
+                        current];
+    _valueLabel.textColor = kAccentColor;
+    _valueLabel.font = [UIFont monospacedDigitSystemFontOfSize:12.0
+                             weight:UIFontWeightRegular];
+    _valueLabel.translatesAutoresizingMaskIntoConstraints = NO;
+
+    _slider = [[UISlider alloc] init];
+    _slider.minimumValue = minV;
+    _slider.maximumValue = maxV;
+    _slider.value = current;
+    _slider.minimumTrackTintColor = kAccentColor;
+    _slider.maximumTrackTintColor =
+        [UIColor colorWithWhite:0.3 alpha:1.0];
+    _slider.translatesAutoresizingMaskIntoConstraints = NO;
+    [_slider addTarget:self
+                action:@selector(slid:)
+      forControlEvents:UIControlEventValueChanged];
+
+    [self addSubview:_titleLabel];
+    [self addSubview:_valueLabel];
+    [self addSubview:_slider];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [_titleLabel.leadingAnchor
+            constraintEqualToAnchor:self.leadingAnchor
+            constant:12],
+        [_titleLabel.topAnchor
+            constraintEqualToAnchor:self.topAnchor
+            constant:10],
+        [_valueLabel.trailingAnchor
+            constraintEqualToAnchor:self.trailingAnchor
+            constant:-12],
+        [_valueLabel.centerYAnchor
+            constraintEqualToAnchor:_titleLabel.centerYAnchor],
+        [_slider.leadingAnchor
+            constraintEqualToAnchor:self.leadingAnchor
+            constant:12],
+        [_slider.trailingAnchor
+            constraintEqualToAnchor:self.trailingAnchor
+            constant:-12],
+        [_slider.topAnchor
+            constraintEqualToAnchor:_titleLabel.bottomAnchor
+            constant:6],
+        [_slider.bottomAnchor
+            constraintEqualToAnchor:self.bottomAnchor
+            constant:-10],
+    ]];
+    return self;
+}
+
+- (void)slid:(UISlider *)sl {
+    setPref(self.prefKey, @(sl.value));
+    self.valueLabel.text = [NSString stringWithFormat:
+                            @"%.2f", sl.value];
+}
+
+@end
+
+// ─── SECTION HEADER ──────────────────────────────────────────
+
+@interface AXSectionHeader : UIView
+@end
+
+@implementation AXSectionHeader
+
+- (instancetype)initWithTitle:(NSString *)title
+                        icon:(NSString *)icon {
+    self = [super init];
+    if (!self) return nil;
+    self.translatesAutoresizingMaskIntoConstraints = NO;
+
+    UILabel *lbl = [[UILabel alloc] init];
+    lbl.translatesAutoresizingMaskIntoConstraints = NO;
+    lbl.text = [NSString stringWithFormat:@"%@  %@",
+                icon, title];
+    lbl.textColor = kAccentColor;
+    lbl.font = [UIFont systemFontOfSize:11.0
+                     weight:UIFontWeightSemibold];
+    lbl.alpha = 0.8;
+    [self addSubview:lbl];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [lbl.leadingAnchor
+            constraintEqualToAnchor:self.leadingAnchor
+            constant:4],
+        [lbl.centerYAnchor
+            constraintEqualToAnchor:self.centerYAnchor],
+        [self.heightAnchor constraintEqualToConstant:28],
+    ]];
+    return self;
+}
+
+@end
+
+// ─── STATUS BAR ──────────────────────────────────────────────
+
+@interface AXStatusBar : UIView
+@property (nonatomic, strong) UILabel *statusLabel;
+@property (nonatomic, strong) UIView  *dot;
+@end
+
+@implementation AXStatusBar
+
+- (instancetype)init {
+    self = [super init];
+    if (!self) return nil;
+    self.translatesAutoresizingMaskIntoConstraints = NO;
+    self.backgroundColor =
+        [UIColor colorWithRed:0.1 green:0.4 blue:0.1 alpha:0.8];
+    self.layer.cornerRadius = 8.0f;
+    self.layer.masksToBounds = YES;
+
+    _dot = [[UIView alloc] init];
+    _dot.backgroundColor = kGreenColor;
+    _dot.layer.cornerRadius = 4.0f;
+    _dot.translatesAutoresizingMaskIntoConstraints = NO;
+
+    _statusLabel = [[UILabel alloc] init];
+    _statusLabel.text = @"AXIOM ACTIVE — BATTERY BYPASSED";
+    _statusLabel.textColor = kGreenColor;
+    _statusLabel.font = [UIFont monospacedDigitSystemFontOfSize:10.0
+                              weight:UIFontWeightBold];
+    _statusLabel.translatesAutoresizingMaskIntoConstraints = NO;
+
+    [self addSubview:_dot];
+    [self addSubview:_statusLabel];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [_dot.leadingAnchor
+            constraintEqualToAnchor:self.leadingAnchor
+            constant:10],
+        [_dot.centerYAnchor
+            constraintEqualToAnchor:self.centerYAnchor],
+        [_dot.widthAnchor constraintEqualToConstant:8],
+        [_dot.heightAnchor constraintEqualToConstant:8],
+        [_statusLabel.leadingAnchor
+            constraintEqualToAnchor:_dot.trailingAnchor
+            constant:8],
+        [_statusLabel.centerYAnchor
+            constraintEqualToAnchor:self.centerYAnchor],
+        [self.heightAnchor constraintEqualToConstant:30],
+    ]];
+
+    // Pulse animation on dot
+    CABasicAnimation *pulse =
+        [CABasicAnimation animationWithKeyPath:@"opacity"];
+    pulse.fromValue = @1.0;
+    pulse.toValue   = @0.3;
+    pulse.duration  = 1.2;
+    pulse.autoreverses  = YES;
+    pulse.repeatCount   = HUGE_VALF;
+    [_dot.layer addAnimation:pulse forKey:@"pulse"];
+
+    return self;
+}
+
+@end
+
+// ─── MAIN MENU WINDOW ────────────────────────────────────────
+
+@interface AXMenuWindow : UIWindow
+@property (nonatomic, strong) UIView        *card;
+@property (nonatomic, strong) UIScrollView  *scroll;
+@property (nonatomic, strong) UIStackView   *stack;
+@property (nonatomic, strong) AXStatusBar   *statusBar;
+@property (nonatomic, assign) CGPoint        dragOffset;
+@property (nonatomic, assign) BOOL           menuVisible;
+- (void)buildUI;
+- (void)toggleMenu;
+@end
+
+@implementation AXMenuWindow
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (!self) return nil;
+    self.windowLevel = UIWindowLevelAlert + 100;
+    self.backgroundColor = [UIColor clearColor];
+    self.userInteractionEnabled = YES;
+    [self buildUI];
+    return self;
+}
+
+- (void)buildUI {
+
+    // ── Floating trigger button ──────────────────────────────
+    UIButton *fab = [UIButton buttonWithType:UIButtonTypeSystem];
+    fab.frame = CGRectMake(20, 120, 48, 48);
+    fab.backgroundColor =
+        [UIColor colorWithRed:0.18 green:0.62 blue:1.0 alpha:0.9];
+    fab.layer.cornerRadius = 24.0f;
+    fab.layer.masksToBounds = YES;
+    fab.layer.shadowColor  = [UIColor blackColor].CGColor;
+    fab.layer.shadowOffset = CGSizeMake(0, 4);
+    fab.layer.shadowRadius = 8.0f;
+    fab.layer.shadowOpacity = 0.5f;
+    [fab setTitle:@"⚡" forState:UIControlStateNormal];
+    fab.titleLabel.font = [UIFont systemFontOfSize:20.0];
+    [fab addTarget:self
+            action:@selector(toggleMenu)
+  forControlEvents:UIControlEventTouchUpInside];
+
+    UIPanGestureRecognizer *fabPan =
+        [[UIPanGestureRecognizer alloc]
+            initWithTarget:self
+            action:@selector(handleFabPan:)];
+    [fab addGestureRecognizer:fabPan];
+    [self addSubview:fab];
+
+    // ── Menu card ────────────────────────────────────────────
+    _card = [[UIView alloc] initWithFrame:
+                CGRectMake(80, 80, kMenuWidth, kMenuHeight)];
+    _card.backgroundColor = kBGColor;
+    _card.layer.cornerRadius = kCornerRadius;
+    _card.layer.masksToBounds = YES;
+    _card.layer.borderColor =
+        [UIColor colorWithWhite:1.0 alpha:0.08].CGColor;
+    _card.layer.borderWidth = 0.5f;
+    _card.hidden = YES;
+    _card.alpha  = 0.0f;
+
+    // Shadow
+    UIView *shadowHost = [[UIView alloc]
+        initWithFrame:_card.frame];
+    shadowHost.backgroundColor = [UIColor clearColor];
+    shadowHost.layer.shadowColor  = [UIColor blackColor].CGColor;
+    shadowHost.layer.shadowOffset = CGSizeMake(0, 8);
+    shadowHost.layer.shadowRadius = 20.0f;
+    shadowHost.layer.shadowOpacity = 0.6f;
+    shadowHost.userInteractionEnabled = NO;
+    [self insertSubview:shadowHost belowSubview:_card];
+
+    // ── Header ───────────────────────────────────────────────
+    UIView *header = [[UIView alloc]
+        initWithFrame:CGRectMake(0, 0, kMenuWidth, 52)];
+    header.backgroundColor =
+        [UIColor colorWithRed:0.12 green:0.12 blue:0.18 alpha:1.0];
+
+    UILabel *titleLbl = [[UILabel alloc] init];
+    titleLbl.text = @"⚡ AXIOM";
+    titleLbl.textColor = kTextColor;
+    titleLbl.font = [UIFont systemFontOfSize:17.0
+                          weight:UIFontWeightBold];
+    titleLbl.frame = CGRectMake(16, 0, 180, 52);
+    [header addSubview:titleLbl];
+
+    UILabel *verLbl = [[UILabel alloc] init];
+    verLbl.text = @"v2.0";
+    verLbl.textColor = kAccentColor;
+    verLbl.font = [UIFont monospacedDigitSystemFontOfSize:11.0
+                       weight:UIFontWeightRegular];
+    verLbl.frame = CGRectMake(kMenuWidth - 50, 0, 40, 52);
+    [header addSubview:verLbl];
+
+    UIButton *closeBtn = [UIButton buttonWithType:
+                          UIButtonTypeSystem];
+    closeBtn.frame = CGRectMake(kMenuWidth - 44, 12, 30, 28);
+    [closeBtn setTitle:@"✕" forState:UIControlStateNormal];
+    [closeBtn setTitleColor:kSubtextColor
+                  forState:UIControlStateNormal];
+    closeBtn.titleLabel.font = [UIFont systemFontOfSize:14.0];
+    [closeBtn addTarget:self
+                 action:@selector(toggleMenu)
+       forControlEvents:UIControlEventTouchUpInside];
+    [header addSubview:closeBtn];
+
+    // Separator line under header
+    UIView *sep = [[UIView alloc]
+        initWithFrame:CGRectMake(0, 51.5, kMenuWidth, 0.5)];
+    sep.backgroundColor =
+        [UIColor colorWithWhite:1.0 alpha:0.1];
+    [header addSubview:sep];
+
+    [_card addSubview:header];
+
+    // ── Status bar ───────────────────────────────────────────
+    _statusBar = [[AXStatusBar alloc] init];
+    _statusBar.frame =
+        CGRectMake(12, 60, kMenuWidth - 24, 30);
+    [_card addSubview:_statusBar];
+
+    // ── Scroll + Stack ───────────────────────────────────────
+    _scroll = [[UIScrollView alloc]
+        initWithFrame:CGRectMake(0, 98,
+                                 kMenuWidth,
+                                 kMenuHeight - 98)];
+    _scroll.showsVerticalScrollIndicator = NO;
+    _scroll.contentInset =
+        UIEdgeInsetsMake(8, 0, 20, 0);
+    [_card addSubview:_scroll];
+
+    _stack = [[UIStackView alloc] init];
+    _stack.axis = UILayoutConstraintAxisVertical;
+    _stack.spacing = 6.0f;
+    _stack.layoutMargins =
+        UIEdgeInsetsMake(0, 12, 0, 12);
+    _stack.layoutMarginsRelativeArrangement = YES;
+    _stack.translatesAutoresizingMaskIntoConstraints = NO;
+    [_scroll addSubview:_stack];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [_stack.topAnchor
+            constraintEqualToAnchor:_scroll.topAnchor],
+        [_stack.leadingAnchor
+            constraintEqualToAnchor:_scroll.leadingAnchor],
+        [_stack.trailingAnchor
+            constraintEqualToAnchor:_scroll.trailingAnchor],
+        [_stack.bottomAnchor
+            constraintEqualToAnchor:_scroll.bottomAnchor],
+        [_stack.widthAnchor
+            constraintEqualToAnchor:_scroll.widthAnchor],
+    ]];
+
+    [self buildRows];
+
+    UIPanGestureRecognizer *cardPan =
+        [[UIPanGestureRecognizer alloc]
+            initWithTarget:self
+            action:@selector(handleCardPan:)];
+    [_card addGestureRecognizer:cardPan];
+
+    [self addSubview:_card];
+}
+
+- (void)buildRows {
+
+    // ── FEATURES ─────────────────────────────────────────────
+    [_stack addArrangedSubview:
+        [[AXSectionHeader alloc]
+            initWithTitle:@"FEATURES" icon:@"🎯"]];
+
+    [_stack addArrangedSubview:
+        [[AXToggleRow alloc]
+            initWithTitle:@"Prediction Line"
+                 subtitle:@"Show shot trajectory"
+                  prefKey:kPrediction
+                  default:YES
+                 onChange:nil]];
+
+    [_stack addArrangedSubview:
+        [[AXToggleRow alloc]
+            initWithTitle:@"Opponent Prediction"
+                 subtitle:@"Show opponent trajectory"
+                  prefKey:kOpponent
+                  default:NO
+                 onChange:nil]];
+
+    [_stack addArrangedSubview:
+        [[AXToggleRow alloc]
+            initWithTitle:@"Table Borders"
+                 subtitle:@"Highlight table edges"
+                  prefKey:kTableBorders
+                  default:YES
+                 onChange:nil]];
+
+    [_stack addArrangedSubview:
+        [[AXToggleRow alloc]
+            initWithTitle:@"Pocket Hints"
+                 subtitle:@"Show pocket markers"
+                  prefKey:kPocketHints
+                  default:YES
+                 onChange:nil]];
+
+    [_stack addArrangedSubview:
+        [[AXToggleRow alloc]
+            initWithTitle:@"Impact Dots"
+                 subtitle:@"Show ball impact points"
+                  prefKey:kImpactDots
+                  default:YES
+                 onChange:nil]];
+
+    // ── AUTOMATION ───────────────────────────────────────────
+    [_stack addArrangedSubview:
+        [[AXSectionHeader alloc]
+            initWithTitle:@"AUTOMATION" icon:@"🤖"]];
+
+    [_stack addArrangedSubview:
+        [[AXToggleRow alloc]
+            initWithTitle:@"Auto Aim"
+                 subtitle:@"Automatic aim alignment"
+                  prefKey:kAutoAim
+                  default:NO
+                 onChange:nil]];
+
+    [_stack addArrangedSubview:
+        [[AXToggleRow alloc]
+            initWithTitle:@"Auto Play"
+                 subtitle:@"Automatic shot execution"
+                  prefKey:kAutoPlay
+                  default:NO
+                 onChange:nil]];
+
+    [_stack addArrangedSubview:
+        [[AXToggleRow alloc]
+            initWithTitle:@"Auto Ball In Hand"
+                 subtitle:@"Auto place ball in hand"
+                  prefKey:kAutoBallInHand
+                  default:NO
+                 onChange:nil]];
+
+    // ── ALERTS ───────────────────────────────────────────────
+    [_stack addArrangedSubview:
+        [[AXSectionHeader alloc]
+            initWithTitle:@"ALERTS" icon:@"⚠️"]];
+
+    [_stack addArrangedSubview:
+        [[AXToggleRow alloc]
+            initWithTitle:@"Scratch Alert"
+                 subtitle:@"Warn on scratch risk"
+                  prefKey:kScratchAlert
+                  default:YES
+                 onChange:nil]];
+
+    [_stack addArrangedSubview:
+        [[AXToggleRow alloc]
+            initWithTitle:@"Wrong Ball Alert"
+                 subtitle:@"Warn on wrong ball hit"
+                  prefKey:kWrongBallAlert
+                  default:YES
+                 onChange:nil]];
+
+    // ── TUNING ───────────────────────────────────────────────
+    [_stack addArrangedSubview:
+        [[AXSectionHeader alloc]
+            initWithTitle:@"TUNING" icon:@"🔧"]];
+
+    [_stack addArrangedSubview:
+        [[AXSliderRow alloc]
+            initWithTitle:@"Line Thickness"
+                  prefKey:kLineThickness
+                      min:0.5f
+                      max:4.0f
+                  default:1.5f]];
+
+    [_stack addArrangedSubview:
+        [[AXSliderRow alloc]
+            initWithTitle:@"Line Opacity"
+                  prefKey:kLineOpacity
+                      min:0.1f
+                      max:1.0f
+                  default:0.85f]];
+
+    [_stack addArrangedSubview:
+        [[AXSliderRow alloc]
+            initWithTitle:@"Auto Aim Strength"
+                  prefKey:kAutoAimStrength
+                      min:0.1f
+                      max:1.0f
+                  default:0.7f]];
+}
+
+- (void)toggleMenu {
+    if (_menuVisible) {
+        [UIView animateWithDuration:0.25
+                              delay:0
+                            options:UIViewAnimationOptionCurveEaseIn
+                         animations:^{
+            self->_card.alpha = 0.0f;
+            self->_card.transform =
+                CGAffineTransformMakeScale(0.92f, 0.92f);
+        } completion:^(BOOL done) {
+            self->_card.hidden = YES;
+            self->_card.transform = CGAffineTransformIdentity;
+        }];
     } else {
-        if (orig_GBOverlaySetModUIHidden) orig_GBOverlaySetModUIHidden(hidden);
+        _card.hidden = NO;
+        _card.transform = CGAffineTransformMakeScale(0.92f, 0.92f);
+        [UIView animateWithDuration:0.3
+                              delay:0
+             usingSpringWithDamping:0.75f
+              initialSpringVelocity:0.5f
+                            options:0
+                         animations:^{
+            self->_card.alpha = 1.0f;
+            self->_card.transform = CGAffineTransformIdentity;
+        } completion:nil];
     }
+    _menuVisible = !_menuVisible;
 }
 
-// ─── UI Helpers ───────────────────────────────────────────────────────────────
-static UIButton *activeAutoBtn    = nil;
-static UIButton *activeOverlayBtn = nil;
-static UILabel  *statusLabel      = nil;
-
-static void updateStatus(void) {
-    if (!statusLabel) return;
-    statusLabel.text = [NSString stringWithFormat:@"Aim: %@ | Overlay: %@ | Battery: ∞",
-                        autoAimEnabled  ? @"ON" : @"OFF",
-                        overlayEnabled  ? @"ON" : @"OFF"];
+- (void)handleFabPan:(UIPanGestureRecognizer *)pan {
+    UIView *fab = pan.view;
+    CGPoint t = [pan translationInView:self];
+    fab.center = CGPointMake(fab.center.x + t.x,
+                             fab.center.y + t.y);
+    [pan setTranslation:CGPointZero inView:self];
 }
 
-static void toggleMenu(void);
-
-@interface ModActions : NSObject
-+ (void)tapAutoAim:(UIButton *)btn;
-+ (void)tapOverlay:(UIButton *)btn;
-+ (void)tapReset:(UIButton *)btn;
-+ (void)tapClose:(UIButton *)btn;
-+ (void)tapFloat:(UIButton *)btn;
-@end
-
-@implementation ModActions
-
-+ (void)tapAutoAim:(UIButton *)btn {
-    autoAimEnabled = !autoAimEnabled;
-    btn.selected = autoAimEnabled;
-    btn.backgroundColor = autoAimEnabled
-        ? [UIColor colorWithRed:0.0  green:0.55 blue:0.27 alpha:1.0]
-        : [UIColor colorWithRed:0.12 green:0.12 blue:0.20 alpha:1.0];
-    [btn setTitle:autoAimEnabled ? @"🎯  Auto Aim   ON" : @"🎯  Auto Aim   OFF"
-         forState:UIControlStateNormal];
-    // Prime immediately if our turn
-    if (autoAimEnabled && gHandle) {
-        void (*primeFn)(void) = (void (*)(void))dlsym(gHandle, "GBAuto_PrimeForCurrentTurn");
-        if (primeFn) primeFn();
+- (void)handleCardPan:(UIPanGestureRecognizer *)pan {
+    if (pan.state == UIGestureRecognizerStateBegan) {
+        _dragOffset = [pan locationInView:_card];
     }
-    updateStatus();
+    CGPoint loc = [pan locationInView:self];
+    _card.frame = CGRectMake(
+        loc.x - _dragOffset.x,
+        loc.y - _dragOffset.y,
+        kMenuWidth,
+        kMenuHeight);
 }
 
-+ (void)tapOverlay:(UIButton *)btn {
-    overlayEnabled = !overlayEnabled;
-    btn.selected = overlayEnabled;
-    btn.backgroundColor = overlayEnabled
-        ? [UIColor colorWithRed:0.0  green:0.35 blue:0.75 alpha:1.0]
-        : [UIColor colorWithRed:0.12 green:0.12 blue:0.20 alpha:1.0];
-    [btn setTitle:overlayEnabled ? @"👁  Overlay     ON" : @"👁  Overlay     OFF"
-         forState:UIControlStateNormal];
-    if (gHandle) {
-        void (*overlayFn)(BOOL) = (void (*)(BOOL))dlsym(gHandle, "GBOverlaySetModUIHidden");
-        if (overlayFn) overlayFn(!overlayEnabled);
-        if (overlayEnabled) {
-            void (*startFn)(void) = (void (*)(void))dlsym(gHandle, "GBOverlayStartIfNeeded");
-            if (startFn) startFn();
-        }
-    }
-    updateStatus();
-}
-
-+ (void)tapReset:(UIButton *)btn {
-    autoAimEnabled = NO;
-    overlayEnabled = NO;
-    if (activeAutoBtn) {
-        activeAutoBtn.selected = NO;
-        activeAutoBtn.backgroundColor = [UIColor colorWithRed:0.12 green:0.12 blue:0.20 alpha:1.0];
-        [activeAutoBtn setTitle:@"🎯  Auto Aim   OFF" forState:UIControlStateNormal];
-    }
-    if (activeOverlayBtn) {
-        activeOverlayBtn.selected = NO;
-        activeOverlayBtn.backgroundColor = [UIColor colorWithRed:0.12 green:0.12 blue:0.20 alpha:1.0];
-        [activeOverlayBtn setTitle:@"👁  Overlay     OFF" forState:UIControlStateNormal];
-    }
-    if (gHandle) {
-        void (*resetFn)(void) = (void (*)(void))dlsym(gHandle, "GBAuto_Reset");
-        if (resetFn) resetFn();
-        void (*clearFn)(void) = (void (*)(void))dlsym(gHandle, "GBOverlayClearPrediction");
-        if (clearFn) clearFn();
-    }
-    updateStatus();
-}
-
-+ (void)tapClose:(UIButton *)btn {
-    toggleMenu();
-}
-
-+ (void)tapFloat:(UIButton *)btn {
-    toggleMenu();
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *hit = [super hitTest:point withEvent:event];
+    if (hit == self) return nil;
+    return hit;
 }
 
 @end
 
-// ─── Menu Builder ─────────────────────────────────────────────────────────────
-static UIButton *styledButton(NSString *title, CGFloat y, SEL sel) {
-    UIButton *b = [UIButton buttonWithType:UIButtonTypeCustom];
-    b.frame = CGRectMake(14, y, 242, 44);
-    [b setTitle:title forState:UIControlStateNormal];
-    [b setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    b.titleLabel.font       = [UIFont boldSystemFontOfSize:13];
-    b.backgroundColor       = [UIColor colorWithRed:0.12 green:0.12 blue:0.20 alpha:1.0];
-    b.layer.cornerRadius    = 11;
-    b.layer.borderWidth     = 1.0;
-    b.layer.borderColor     = [UIColor colorWithRed:0.0 green:0.75 blue:1.0 alpha:0.5].CGColor;
-    b.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
-    b.titleEdgeInsets       = UIEdgeInsetsMake(0, 14, 0, 0);
-    [b addTarget:[ModActions class] action:sel forControlEvents:UIControlEventTouchUpInside];
-    return b;
+// ─── GLOBAL WINDOW ───────────────────────────────────────────
+
+static AXMenuWindow *gMenuWindow;
+
+// ─── GBMODMENU HOOKS ─────────────────────────────────────────
+
+%hook GBModMenu
+
+- (void)startBatteryRefreshTimer {
+    // dead — battery gate never fires
 }
 
-static void buildMenu(void) {
-    CGRect sc = [UIScreen mainScreen].bounds;
-    CGFloat w = 270, h = 370;
-    menuView = [[UIView alloc] initWithFrame:CGRectMake(
-        (sc.size.width - w) / 2,
-        (sc.size.height - h) / 2,
-        w, h)];
-    menuView.backgroundColor    = [UIColor colorWithRed:0.04 green:0.04 blue:0.10 alpha:0.97];
-    menuView.layer.cornerRadius = 20;
-    menuView.layer.borderWidth  = 1.5;
-    menuView.layer.borderColor  = [UIColor colorWithRed:0.0 green:0.75 blue:1.0 alpha:0.9].CGColor;
-    menuView.layer.shadowColor  = [UIColor colorWithRed:0.0 green:0.75 blue:1.0 alpha:1.0].CGColor;
-    menuView.layer.shadowOpacity= 0.7;
-    menuView.layer.shadowRadius = 16;
-
-    // Title
-    UILabel *ttl = [[UILabel alloc] initWithFrame:CGRectMake(0, 14, w, 24)];
-    ttl.text          = @"8Ball Unlimited";
-    ttl.textColor     = [UIColor colorWithRed:0.0 green:0.85 blue:1.0 alpha:1.0];
-    ttl.font          = [UIFont boldSystemFontOfSize:17];
-    ttl.textAlignment = NSTextAlignmentCenter;
-    [menuView addSubview:ttl];
-
-    // Status
-    statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 42, w, 18)];
-    statusLabel.text          = @"Aim: OFF | Overlay: OFF | Battery: ∞";
-    statusLabel.textColor     = [UIColor colorWithRed:0.4 green:1.0 blue:0.6 alpha:1.0];
-    statusLabel.font          = [UIFont systemFontOfSize:10];
-    statusLabel.textAlignment = NSTextAlignmentCenter;
-    [menuView addSubview:statusLabel];
-
-    // Divider
-    UIView *div = [[UIView alloc] initWithFrame:CGRectMake(14, 66, 242, 1)];
-    div.backgroundColor = [UIColor colorWithRed:0.0 green:0.75 blue:1.0 alpha:0.25];
-    [menuView addSubview:div];
-
-    // Buttons
-    UIButton *autoBtn    = styledButton(@"🎯  Auto Aim   OFF", 76,  @selector(tapAutoAim:));
-    UIButton *overlayBtn = styledButton(@"👁  Overlay     OFF", 130, @selector(tapOverlay:));
-    UIButton *resetBtn   = styledButton(@"🔄  Reset All",       184, @selector(tapReset:));
-    UIButton *closeBtn   = styledButton(@"✕   Close Menu",      238, @selector(tapClose:));
-
-    closeBtn.backgroundColor = [UIColor colorWithRed:0.35 green:0.0 blue:0.0 alpha:1.0];
-    closeBtn.layer.borderColor = [UIColor colorWithRed:1.0 green:0.2 blue:0.2 alpha:0.5].CGColor;
-
-    // Battery info row
-    UILabel *battLbl = [[UILabel alloc] initWithFrame:CGRectMake(0, 296, w, 18)];
-    battLbl.text          = @"⚡ Battery: Unlimited  •  Ads: Removed";
-    battLbl.textColor     = [UIColor colorWithRed:0.5 green:1.0 blue:0.5 alpha:0.8];
-    battLbl.font          = [UIFont systemFontOfSize:10];
-    battLbl.textAlignment = NSTextAlignmentCenter;
-    [menuView addSubview:battLbl];
-
-    UILabel *ver = [[UILabel alloc] initWithFrame:CGRectMake(0, 344, w, 16)];
-    ver.text          = @"v1.0 — by axiom";
-    ver.textColor     = [UIColor colorWithRed:0.3 green:0.3 blue:0.4 alpha:1.0];
-    ver.font          = [UIFont systemFontOfSize:9];
-    ver.textAlignment = NSTextAlignmentCenter;
-    [menuView addSubview:ver];
-
-    [menuView addSubview:autoBtn];
-    [menuView addSubview:overlayBtn];
-    [menuView addSubview:resetBtn];
-    [menuView addSubview:closeBtn];
-
-    activeAutoBtn    = autoBtn;
-    activeOverlayBtn = overlayBtn;
+- (void)stopBatteryRefreshTimer {
+    %orig;
 }
 
-static void toggleMenu(void) {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (!menuWindow) {
-            menuWindow = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-            menuWindow.windowLevel = UIWindowLevelAlert + 100;
-            menuWindow.backgroundColor = [UIColor clearColor];
-            menuWindow.rootViewController = [[UIViewController alloc] init];
-            [menuWindow makeKeyAndVisible];
-            buildMenu();
-            [menuWindow.rootViewController.view addSubview:menuView];
-        }
-        menuVisible = !menuVisible;
-        menuView.hidden   = !menuVisible;
-        menuWindow.hidden = !menuVisible;
-    });
+- (void)setBatteryRefreshTimer:(id)timer {
+    %orig(nil);
 }
 
-// ─── Floating Button ──────────────────────────────────────────────────────────
-static void spawnFloatButton(void) {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        floatWindow = [[UIWindow alloc] initWithFrame:CGRectMake(10, 160, 52, 52)];
-        floatWindow.windowLevel = UIWindowLevelAlert + 200;
-        floatWindow.backgroundColor = [UIColor clearColor];
-        floatWindow.rootViewController = [[UIViewController alloc] init];
-        [floatWindow makeKeyAndVisible];
-
-        UIButton *fab = [UIButton buttonWithType:UIButtonTypeCustom];
-        fab.frame = CGRectMake(0, 0, 52, 52);
-        fab.backgroundColor = [UIColor colorWithRed:0.0 green:0.75 blue:1.0 alpha:0.92];
-        fab.layer.cornerRadius  = 26;
-        fab.layer.shadowColor   = [UIColor colorWithRed:0.0 green:0.75 blue:1.0 alpha:1.0].CGColor;
-        fab.layer.shadowOpacity = 0.9;
-        fab.layer.shadowRadius  = 10;
-        [fab setTitle:@"8B" forState:UIControlStateNormal];
-        [fab setTitleColor:[UIColor blackColor] forState:UIControlStateNormal];
-        fab.titleLabel.font = [UIFont boldSystemFontOfSize:15];
-        [fab addTarget:[ModActions class]
-                action:@selector(tapFloat:)
-      forControlEvents:UIControlEventTouchUpInside];
-
-        [floatWindow.rootViewController.view addSubview:fab];
-    });
+- (id)batteryRefreshTimer {
+    return nil;
 }
 
-// ─── Image finder ─────────────────────────────────────────────────────────────
-static void *find80poolHandle(void) {
-    uint32_t count = _dyld_image_count();
-    uint32_t i;
-    for (i = 0; i < count; i++) {
-        const char *imgName = _dyld_get_image_name(i);
-        if (imgName && strstr(imgName, "80pool")) {
-            return dlopen(imgName, RTLD_NOLOAD | RTLD_LAZY);
-        }
-    }
-    return NULL;
+- (BOOL)requirePremiumForAutomationToggle:(id)toggle {
+    return NO;
 }
 
-// ─── Hook installer ───────────────────────────────────────────────────────────
-static void installHooks(void) {
-    void *handle = find80poolHandle();
-    if (!handle) return;
-    gHandle = handle;
-
-    void *symIsActive    = dlsym(handle, "GBModBatteryIsActive");
-    void *symRemSec      = dlsym(handle, "GBModBatteryRemainingSeconds");
-    void *symOnGrant     = dlsym(handle, "GBModBatteryOnGrant");
-    void *symShowRew     = dlsym(handle, "GBModBatteryShowRewarded");
-    void *symStoreActive = dlsym(handle, "GBModBatteryStoreIsActive");
-    void *symStoreRem    = dlsym(handle, "GBModBatteryStoreRemainingSeconds");
-    void *symStoreBoot   = dlsym(handle, "GBModBatteryStoreBootstrap");
-    void *symStoreGrant  = dlsym(handle, "GBModBatteryStoreGrantFromReward");
-    void *symBypass      = dlsym(handle, "GBLibloaderBypassInstall");
-    void *symTick        = dlsym(handle, "GBAuto_Tick");
-    void *symPlayerTurn  = dlsym(handle, "GBAuto_OnPlayerTurn");
-    void *symOverlay     = dlsym(handle, "GBOverlaySetModUIHidden");
-
-    if (symIsActive)    MSHookFunction(symIsActive,    (void *)hook_BatteryIsActive,        (void **)&orig_BatteryIsActive);
-    if (symRemSec)      MSHookFunction(symRemSec,      (void *)hook_BatteryRemainingSeconds, (void **)&orig_BatteryRemainingSeconds);
-    if (symOnGrant)     MSHookFunction(symOnGrant,     (void *)hook_BatteryOnGrant,          (void **)&orig_BatteryOnGrant);
-    if (symShowRew)     MSHookFunction(symShowRew,     (void *)hook_BatteryShowRewarded,     (void **)&orig_BatteryShowRewarded);
-    if (symStoreActive) MSHookFunction(symStoreActive, (void *)hook_StoreIsActive,           (void **)&orig_StoreIsActive);
-    if (symStoreRem)    MSHookFunction(symStoreRem,    (void *)hook_StoreRemainingSeconds,   (void **)&orig_StoreRemainingSeconds);
-    if (symStoreBoot)   MSHookFunction(symStoreBoot,   (void *)hook_StoreBootstrap,          (void **)&orig_StoreBootstrap);
-    if (symStoreGrant)  MSHookFunction(symStoreGrant,  (void *)hook_StoreGrantFromReward,    (void **)&orig_StoreGrantFromReward);
-    if (symBypass)      MSHookFunction(symBypass,      (void *)hook_LibloaderBypassInstall,  (void **)&orig_LibloaderBypassInstall);
-    if (symTick)        MSHookFunction(symTick,        (void *)hook_GBAuto_Tick,             (void **)&orig_GBAuto_Tick);
-    if (symPlayerTurn)  MSHookFunction(symPlayerTurn,  (void *)hook_GBAuto_OnPlayerTurn,     (void **)&orig_GBAuto_OnPlayerTurn);
-    if (symOverlay)     MSHookFunction(symOverlay,     (void *)hook_GBOverlaySetModUIHidden, (void **)&orig_GBOverlaySetModUIHidden);
-
-    spawnFloatButton();
+- (void)refreshPremiumBatteryUI {
+    // dead — UI never locks
 }
 
-// ─── Constructor ──────────────────────────────────────────────────────────────
+- (NSString *)premiumStatusText {
+    return @"Active";
+}
+
+- (void)applyPremiumLockState {
+    // dead — lock state never applied
+}
+
+%end
+
+// ─── PREDICTION DRAW HOOKS ───────────────────────────────────
+
+%hook GBPredictionDrawView
+
+- (void)updateWithResult:(id)result
+       predictionRevision:(NSInteger)rev
+              tableScale:(CGFloat)scale
+            drawBorders:(BOOL)borders
+            drawPockets:(BOOL)pockets
+          drawImpactDots:(BOOL)dots
+           lineThickness:(CGFloat)thickness
+             lineOpacity:(CGFloat)opacity
+               tableRect:(CGRect)rect
+      scratchAlertEnabled:(BOOL)scratch
+   wrongBallAlertEnabled:(BOOL)wrongBall
+              flashPhase:(CGFloat)flash {
+
+    // Route all values through live prefs
+    %orig(result,
+          rev,
+          scale,
+          prefBool(kTableBorders, YES),
+          prefBool(kPocketHints, YES),
+          prefBool(kImpactDots, YES),
+          prefFloat(kLineThickness, 1.5f),
+          prefFloat(kLineOpacity, 0.85f),
+          rect,
+          prefBool(kScratchAlert, YES),
+          prefBool(kWrongBallAlert, YES),
+          flash);
+}
+
+%end
+
+// ─── CONSTRUCTOR ─────────────────────────────────────────────
+
+static void loadPrefs(void) {
+    NSString *path = [NSString stringWithFormat:
+        @"/var/mobile/Library/Preferences/%@.plist", kTweakID];
+    NSDictionary *loaded =
+        [NSDictionary dictionaryWithContentsOfFile:path];
+    gPrefs = loaded
+        ? [loaded mutableCopy]
+        : [NSMutableDictionary dictionary];
+}
+
 %ctor {
+    loadPrefs();
+    %init;
+
     dispatch_after(
-        dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)),
-        dispatch_get_main_queue(),
-        ^{ installHooks(); }
-    );
+        dispatch_time(DISPATCH_TIME_NOW,
+                      (int64_t)(1.5 * NSEC_PER_SEC)),
+        dispatch_get_main_queue(), ^{
+
+        UIWindowScene *scene = nil;
+        for (UIWindowScene *s in
+             [UIApplication sharedApplication]
+             .connectedScenes) {
+            if (s.activationState ==
+                UISceneActivationStateForegroundActive) {
+                scene = s;
+                break;
+            }
+        }
+
+        CGRect screen = [UIScreen mainScreen].bounds;
+        gMenuWindow = [[AXMenuWindow alloc]
+            initWithFrame:screen];
+
+        if (scene) {
+            gMenuWindow.windowScene = scene;
+        }
+
+        gMenuWindow.hidden = NO;
+        [gMenuWindow makeKeyAndVisible];
+
+        NSLog(@"[AXIOM] loaded — battery gate dead, "
+              @"UI live, prefs active");
+    });
 }
