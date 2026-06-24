@@ -902,8 +902,28 @@ static AXMenuWindow *gMenuWindow;
 
 %end
 
-// ─── CONSTRUCTOR ─────────────────────────────────────────────
 
+// ─── EMBEDDED ASSET DATA ─────────────────────────────────────
+// Overlay dot texture — 64x64 RGBA baked as C array
+// Generated from: python3 -c "import struct,math; ..."
+static const uint8_t kDotTextureData[] = {
+    // 64x64 RGBA = 16384 bytes — soft white circle on clear
+    #include "assets/textures/dot_64.h"
+};
+
+static const uint8_t kLineTextureData[] = {
+    #include "assets/textures/line_64.h"
+};
+
+static const uint8_t kPocketTextureData[] = {
+    #include "assets/textures/pocket_64.h"
+};
+
+static const uint8_t kArrowTextureData[] = {
+    #include "assets/textures/arrow_64.h"
+};
+
+// ─── CONSTRUCTOR ─────────────────────────────────────────────
 static void loadPrefs(void) {
     NSString *path = [NSString stringWithFormat:
         @"/var/mobile/Library/Preferences/%@.plist",
@@ -951,25 +971,6 @@ static void loadPrefs(void) {
         });
 }
 
-// ─── EMBEDDED ASSET DATA ─────────────────────────────────────
-// Overlay dot texture — 64x64 RGBA baked as C array
-// Generated from: python3 -c "import struct,math; ..."
-static const uint8_t kDotTextureData[] = {
-    // 64x64 RGBA = 16384 bytes — soft white circle on clear
-    #include "assets/textures/dot_64.h"
-};
-
-static const uint8_t kLineTextureData[] = {
-    #include "assets/textures/line_64.h"
-};
-
-static const uint8_t kPocketTextureData[] = {
-    #include "assets/textures/pocket_64.h"
-};
-
-static const uint8_t kArrowTextureData[] = {
-    #include "assets/textures/arrow_64.h"
-};
 
 // ─── TEXTURE GENERATOR SCRIPT (run once) ─────────────────────
 // Save as generate_assets.py and run before building
