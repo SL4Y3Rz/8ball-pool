@@ -14,6 +14,11 @@
 #import <sys/types.h>
 #import <unistd.h>
 
+// ─── FORWARD DECLARATIONS ────────────────────────────────────
+static void loadEmbeddedAssets(void);
+static void installBypassHooks(void);
+static void loadPrefs(void);
+
 // ─── CONSTANTS ───────────────────────────────────────────────
 #define kTweakID @"com.axiom.80pool"
 #define kMenuWidth 280.0f
