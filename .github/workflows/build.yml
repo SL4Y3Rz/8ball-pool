@@ -29,7 +29,6 @@ jobs:
           mkdir -p assets/textures
           python3 - <<'EOF'
           import math, os
-
           os.makedirs("assets/textures", exist_ok=True)
 
           def circle_texture(size=64, name="dot_64"):
@@ -37,16 +36,12 @@ jobs:
               data = []
               for y in range(size):
                   for x in range(size):
-                      dx = x - cx
-                      dy = y - cy
+                      dx = x - cx; dy = y - cy
                       dist = math.sqrt(dx*dx + dy*dy)
                       r = size / 2
-                      if dist < r - 2:
-                          a = 255
-                      elif dist < r:
-                          a = int(255 * (r - dist) / 2)
-                      else:
-                          a = 0
+                      if dist < r - 2: a = 255
+                      elif dist < r: a = int(255 * (r - dist) / 2)
+                      else: a = 0
                       data += [255, 255, 255, a]
               with open(f"assets/textures/{name}.h", "w") as f:
                   f.write(", ".join(str(b) for b in data))
@@ -67,17 +62,13 @@ jobs:
               data = []
               for y in range(size):
                   for x in range(size):
-                      dx = x - cx
-                      dy = y - cy
+                      dx = x - cx; dy = y - cy
                       dist = math.sqrt(dx*dx + dy*dy)
                       outer = size / 2
                       inner = size / 2 - 6
-                      if inner < dist < outer:
-                          a = 200
-                      elif dist <= inner:
-                          a = 60
-                      else:
-                          a = 0
+                      if inner < dist < outer: a = 200
+                      elif dist <= inner: a = 60
+                      else: a = 0
                       data += [100, 200, 255, a]
               with open(f"assets/textures/{name}.h", "w") as f:
                   f.write(", ".join(str(b) for b in data))
@@ -86,8 +77,7 @@ jobs:
               data = []
               for y in range(size):
                   for x in range(size):
-                      nx = x / size
-                      ny = y / size
+                      nx = x / size; ny = y / size
                       in_body = (0.4 < nx < 0.6 and 0.3 < ny < 0.8)
                       in_head = (ny < 0.35 and abs(nx - 0.5) < (0.35 - ny) * 1.2)
                       a = 220 if (in_body or in_head) else 0
