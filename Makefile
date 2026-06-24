@@ -7,13 +7,10 @@ include $(THEOS)/makefiles/common.mk
 TWEAK_NAME = AxiomPool
 
 AxiomPool_FILES = Tweak.xm
-AxiomPool_CFLAGS = -fobjc-arc -Wno-unused-variable
+AxiomPool_CFLAGS = -fobjc-arc -Wno-unused-function -Wno-unused-variable
 AxiomPool_CCFLAGS = -std=c++17
 AxiomPool_FRAMEWORKS = UIKit CoreGraphics QuartzCore
 AxiomPool_PRIVATE_FRAMEWORKS = GraphicsServices
 AxiomPool_LIBRARIES = substrate
-
-# ── embed assets into final dylib ──────────────────────────
-AxiomPool_RESOURCE_FILES = assets/
 
 include $(THEOS)/makefiles/tweak.mk
