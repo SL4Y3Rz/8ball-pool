@@ -912,16 +912,13 @@ static void loadPrefs(void) {
 
 %ctor {
     loadPrefs();
-
-    // %init FIRST — then hooks after process settles
+    loadEmbeddedAssets(); // ← add this line
     %init;
 
     dispatch_after(
         dispatch_time(DISPATCH_TIME_NOW,
             (int64_t)(0.5 * NSEC_PER_SEC)),
         dispatch_get_main_queue(), ^{
-
-            // bypass installs after runtime is stable
             installBypassHooks();
         });
 
@@ -929,7 +926,6 @@ static void loadPrefs(void) {
         dispatch_time(DISPATCH_TIME_NOW,
             (int64_t)(1.5 * NSEC_PER_SEC)),
         dispatch_get_main_queue(), ^{
-
             UIWindowScene *scene = nil;
             for (UIWindowScene *s in
                  [UIApplication sharedApplication]
@@ -940,20 +936,13 @@ static void loadPrefs(void) {
                     break;
                 }
             }
-
             CGRect screen = [UIScreen mainScreen].bounds;
-            gMenuWindow   = [[AXMenuWindow alloc]
+            gMenuWindow = [[AXMenuWindow alloc]
                 initWithFrame:screen];
-
-            if (scene) {
-                gMenuWindow.windowScene = scene;
-            }
-
+            if (scene) gMenuWindow.windowScene = scene;
             gMenuWindow.hidden = NO;
             [gMenuWindow makeKeyAndVisible];
-
-            NSLog(@"[AXIOM] v2.2 loaded — "
-                  @"bypass active, battery dead, UI live");
+            NSLog(@"[AXIOM] v2.1 loaded");
         });
 }
 
@@ -1080,7 +1069,7 @@ static UIImage *imageFromRGBAData(const uint8_t *data,
     return img;
 }
 
-static void loadEmbeddedAssets(void) {
+static void __attribute__((used)) loadEmbeddedAssets(void) {
     gDotImage    = imageFromRGBAData(kDotTextureData,    64, 64);
     gLineImage   = imageFromRGBAData(kLineTextureData,   64, 64);
     gPocketImage = imageFromRGBAData(kPocketTextureData, 64, 64);
