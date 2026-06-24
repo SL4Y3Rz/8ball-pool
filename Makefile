@@ -7,7 +7,10 @@ include $(THEOS)/makefiles/common.mk
 TWEAK_NAME = AxiomPool
 
 AxiomPool_FILES = Tweak.xm
-AxiomPool_CFLAGS = -fobjc-arc -Wno-unused-function -Wno-unused-variable
+AxiomPool_CFLAGS = -fobjc-arc \
+    -Wno-unused-function \
+    -Wno-unused-variable \
+    -Wno-ignored-attributes
 AxiomPool_CCFLAGS = -std=c++17
 AxiomPool_FRAMEWORKS = UIKit CoreGraphics QuartzCore
 AxiomPool_PRIVATE_FRAMEWORKS = GraphicsServices
