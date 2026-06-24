@@ -937,7 +937,7 @@ static void loadPrefs(void) {
 
 %ctor {
     loadPrefs();
-    loadEmbeddedAssets(); // ← add this line
+    loadEmbeddedAssets();  // ← add this line
     %init;
 
     dispatch_after(
